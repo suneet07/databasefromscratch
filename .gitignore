@@ -1,0 +1,13 @@
+# Compiled binaries and object files
+*.exe
+*.o
+*.obj
+*.pdb
+
+# Database runtime data directories and logs
+lsm_data/
+demo_data/
+bench_data/
+test_lsm_tmp/
+*.sst
+*.log
