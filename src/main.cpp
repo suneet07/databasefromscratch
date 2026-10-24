@@ -21,6 +21,7 @@ void PrintBanner(const LSMDatabase& db, const std::string& data_dir) {
     std::cout << "  WAL Recovered Startup : " << stats.wal_recovered_records << " records\n";
     std::cout << "  Loaded SSTables       : " << stats.total_sstables << " files\n";
     std::cout << "  MemTable Flush Limit  : " << db.config().memtable_flush_threshold_bytes << " bytes\n";
+    std::cout << "  WAL fsync per write   : " << (db.config().sync_wal ? "on" : "off (--no-sync)") << "\n";
     std::cout << "====================================================================\n";
     std::cout << "Type HELP for commands, or try: PUT user:1 Alice, GET user:1, STATS\n\n";
 }
@@ -159,7 +160,7 @@ void RunGuidedDemo(LSMDatabase& db) {
     PrintStats(db);
 
     std::cout << "\n4. Querying keys across layers (Newest SSTable shadows older SSTables):\n";
-    for (const std::string& k : {"user:101", "user:102", "user:103", "user:104", "user:105", "user:999"}) {
+    for (const std::string k : {"user:101", "user:102", "user:103", "user:104", "user:105", "user:999"}) {
         std::string val;
         if (db.Get(k, &val)) {
             std::cout << "   GET " << std::setw(10) << std::left << k << " -> \"" << val << "\"\n";
@@ -185,12 +186,15 @@ int main(int argc, char* argv[]) {
     std::string data_dir = "./lsm_data";
     bool run_demo = false;
     bool run_bench = false;
+    bool sync_wal = true;
     size_t bench_count = 5000;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--dir" && i + 1 < argc) {
             data_dir = argv[++i];
+        } else if (arg == "--no-sync") {
+            sync_wal = false;
         } else if (arg == "--demo") {
             run_demo = true;
         } else if (arg == "--bench") {
@@ -201,7 +205,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    LSMDatabase db(data_dir);
+    LSMConfig config;
+    config.sync_wal = sync_wal;
+    LSMDatabase db(data_dir, config);
 
     if (run_demo) {
         PrintBanner(db, data_dir);

@@ -1,6 +1,7 @@
 #ifndef LSM_WAL_H
 #define LSM_WAL_H
 
+#include "io.h"
 #include "types.h"
 #include <cstdint>
 #include <cstdio>
@@ -31,8 +32,11 @@ public:
     WriteAheadLog(const WriteAheadLog&) = delete;
     WriteAheadLog& operator=(const WriteAheadLog&) = delete;
 
-    // Append a key-value or tombstone operation to the log and flush to OS buffer
-    bool Append(const std::string& key, const ValueEntry& entry) {
+    // Append a key-value or tombstone operation to the log.
+    // flush() only hands bytes to the OS page cache; with sync=true the record is
+    // also fdatasync'd, so an acknowledged write survives power loss, not just a
+    // process crash.
+    bool Append(const std::string& key, const ValueEntry& entry, bool sync = false) {
         if (!out_.is_open()) {
             OpenForAppend();
             if (!out_.is_open()) return false;
@@ -66,6 +70,9 @@ public:
         out_.flush();
 
         if (!out_.good()) {
+            return false;
+        }
+        if (sync && !sync_handle_.Sync()) {
             return false;
         }
 
@@ -151,11 +158,19 @@ public:
         OpenForAppend();
     }
 
+    // Force everything appended so far to stable storage.
+    bool Sync() {
+        if (!out_.is_open()) return false;
+        out_.flush();
+        return out_.good() && sync_handle_.Sync();
+    }
+
     void Close() {
         if (out_.is_open()) {
             out_.flush();
             out_.close();
         }
+        sync_handle_.Close();
     }
 
     size_t bytes_written() const { return bytes_written_; }
@@ -170,11 +185,13 @@ private:
             if (pos > 0) {
                 bytes_written_ = static_cast<size_t>(pos);
             }
+            sync_handle_.Open(path_);
         }
     }
 
     std::string path_;
     std::ofstream out_;
+    io::SyncHandle sync_handle_;
     size_t bytes_written_;
 };
 

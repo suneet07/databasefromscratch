@@ -43,6 +43,16 @@ public:
         return result;
     }
 
+    // Export entries with start_key <= key <= end_key ("" = unbounded), via SkipList::Seek
+    std::vector<KeyValue> ExportRange(const std::string& start_key, const std::string& end_key) const {
+        std::vector<KeyValue> result;
+        for (SkipList::Iterator it = skiplist_.Seek(start_key); it.valid(); it.next()) {
+            if (!end_key.empty() && it.key() > end_key) break;
+            result.push_back(KeyValue{it.key(), it.entry()});
+        }
+        return result;
+    }
+
     void Clear() {
         skiplist_.Clear();
     }
