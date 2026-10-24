@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / C++${{ matrix.std }} / ${{ matrix.config }}${{ matrix.sanitize && format(' / {0}', matrix.sanitize) || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  std: 14, config: Release }
+          - { os: ubuntu-latest,  std: 17, config: Release }
+          - { os: ubuntu-latest,  std: 14, config: Debug, sanitize: address }
+          - { os: ubuntu-latest,  std: 17, config: Debug, sanitize: thread }
+          - { os: macos-latest,   std: 14, config: Release }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+          -DCMAKE_CXX_STANDARD=${{ matrix.std }}
+          -DLSM_SANITIZE=${{ matrix.sanitize }}
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: CLI smoke test
+        run: ./build/lsm_db --dir build/bench_data --no-sync --bench 3000
