@@ -11,3 +11,7 @@ bench_data/
 test_lsm_tmp/
 *.sst
 *.log
+
+# CMake build output
+build/
+test_lsm_tmp_*/

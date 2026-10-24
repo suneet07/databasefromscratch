@@ -2,12 +2,15 @@
 #define LSM_SSTABLE_H
 
 #include "bloom.h"
+#include "io.h"
 #include "types.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace lsm {
@@ -55,7 +58,11 @@ public:
             return nullptr;
         }
 
-        std::ofstream out(filepath, std::ios::binary | std::ios::trunc);
+        // Crash safety: write everything to "<path>.tmp", fsync it, then atomically
+        // rename it into place. A crash mid-write can only leave a stray .tmp file
+        // (cleaned up on open), never a truncated table under the real name.
+        const std::string tmp_path = filepath + ".tmp";
+        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
         if (!out.is_open()) {
             return nullptr;
         }
@@ -75,8 +82,12 @@ public:
             uint64_t record_offset = static_cast<uint64_t>(out.tellp());
 
             if (i % kSparseIndexStride == 0) {
+                // NOTE: don't pass kSparseIndexStride to std::min — it takes its
+                // arguments by reference, which ODR-uses the static constexpr member
+                // and fails to link in C++14 debug builds (no out-of-line definition).
+                const size_t remaining = sorted_entries.size() - i;
                 uint32_t block_count = static_cast<uint32_t>(
-                    std::min(kSparseIndexStride, sorted_entries.size() - i));
+                    remaining < kSparseIndexStride ? remaining : kSparseIndexStride);
                 table->sparse_index_.push_back(
                     SparseIndexEntry{kv.key, record_offset, block_count});
             }
@@ -126,7 +137,15 @@ public:
 
         out.flush();
         table->file_size_ = static_cast<uint64_t>(out.tellp());
+        const bool write_ok = out.good();
         out.close();
+
+        if (!write_ok || out.fail() || !io::SyncFile(tmp_path) ||
+            !io::AtomicReplace(tmp_path, filepath)) {
+            std::remove(tmp_path.c_str());
+            return nullptr;
+        }
+        io::SyncDirectory(DirName(filepath));
 
         return table;
     }
@@ -256,7 +275,78 @@ public:
         return false;
     }
 
-    // Read all records in sorted order (used for Compaction and Range Scans)
+    // Forward-only streaming cursor over this table's records in key order.
+    // The file is opened when the iterator is created, so on POSIX it stays
+    // readable even if compaction unlinks the table while a scan is running.
+    class Iterator {
+    public:
+        bool Valid() const { return valid_; }
+        const KeyValue& Current() const { return current_; }
+        const std::string& key() const { return current_.key; }
+        const ValueEntry& entry() const { return current_.entry; }
+
+        void Next() {
+            if (remaining_ == 0 || !ReadRecord(in_, &current_)) {
+                valid_ = false;
+                return;
+            }
+            --remaining_;
+            valid_ = true;
+        }
+
+        // Position at the first record with key >= target ("" = first record).
+        // Uses the in-memory sparse index to jump to the right 16-record block,
+        // so only that block is scanned instead of the whole file.
+        void Seek(const std::string& target) {
+            valid_ = false;
+            if (!in_.is_open()) return;
+
+            size_t block = 0;
+            if (!target.empty() && target > table_->min_key_) {
+                const auto& idx = table_->sparse_index_;
+                size_t left = 0, right = idx.size();
+                while (left < right) {
+                    size_t mid = left + (right - left) / 2;
+                    if (idx[mid].key <= target) left = mid + 1; else right = mid;
+                }
+                block = (left == 0) ? 0 : left - 1;
+            }
+
+            uint64_t offset = 0;
+            if (!table_->sparse_index_.empty()) {
+                offset = table_->sparse_index_[block].file_offset;
+            }
+            const uint64_t skipped = static_cast<uint64_t>(block) * kSparseIndexStride;
+            remaining_ = (skipped >= table_->num_entries_) ? 0 : table_->num_entries_ - skipped;
+
+            in_.clear();
+            in_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+            Next();
+            while (valid_ && current_.key < target) Next();
+        }
+
+    private:
+        friend class SSTable;
+        explicit Iterator(std::shared_ptr<const SSTable> table)
+            : table_(std::move(table)),
+              in_(table_->filepath_, std::ios::binary),
+              remaining_(0),
+              valid_(false) {}
+
+        std::shared_ptr<const SSTable> table_;
+        std::ifstream in_;
+        uint64_t remaining_;
+        bool valid_;
+        KeyValue current_;
+    };
+
+    // Create an unpositioned iterator; call Seek() before use.
+    static std::unique_ptr<Iterator> NewIterator(const std::shared_ptr<const SSTable>& table) {
+        return std::unique_ptr<Iterator>(new Iterator(table));
+    }
+
+    // Read all records in sorted order (loads the whole table into memory;
+    // prefer NewIterator() for scans and compaction)
     std::vector<KeyValue> ReadAllEntries() const {
         std::vector<KeyValue> entries;
         entries.reserve(num_entries_);
@@ -285,6 +375,11 @@ public:
 
 private:
     SSTable() : table_id_(0), level_(0), num_entries_(0), file_size_(0) {}
+
+    static std::string DirName(const std::string& path) {
+        size_t pos = path.find_last_of("/\\");
+        return pos == std::string::npos ? std::string(".") : path.substr(0, pos);
+    }
 
     static void WriteString(std::ofstream& out, const std::string& s) {
         uint32_t len = static_cast<uint32_t>(s.size());
